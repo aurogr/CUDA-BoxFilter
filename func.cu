@@ -37,7 +37,7 @@ int FILTERSIZE = 9;
 //#define _CONSTANT_MEMORY 
 
 #ifdef _CONSTANT_MEMORY
-    #define CONSTANT_FILTER_SIZE FILTERSIZE
+    #define MAX_CONSTANT_FILTER_SIZE FILTERSIZE
     __constant__ float d_filter_costant[CONSTANT_FILTER_SIZE * CONSTANT_FILTER_SIZE];
 #endif // _CONSTANT_MEMORY
 
@@ -179,7 +179,7 @@ void allocateFilterAndCopyToGPU(const float* h_filter, const size_t filterWidth,
 {
 	// TODO: DONE
 #ifdef _CONSTANT_MEMORY
-    cudaMemcpyToSymbol(d_filter_costant, h_filter, sizeof(float) * filterWidth * filterWidth);
+	cudaMemcpyToSymbol(d_filter_costant, h_filter, sizeof(float) * filterWidth * filterWidth);
 	*d_filter = nullptr; // pointer is not used in this case since we will access the filter directly from constant memory
 
 #elif _SHARED_MEMORY
@@ -242,6 +242,20 @@ void create_filter(float** h_filter, int* filterWidth, int id_filter) {
         (*h_filter)[15] = 0; (*h_filter)[16] = -1.; (*h_filter)[17] = -2.; (*h_filter)[18] = -1.; (*h_filter)[19] = 0;
         (*h_filter)[20] = 0;  (*h_filter)[21] = 0;   (*h_filter)[22] = -1.; (*h_filter)[23] = 0;   (*h_filter)[24] = 0;
     }
+
+    case 2: // Filtro sobel horizontal 3x3
+    {
+        (*h_filter)[0] = -1; (*h_filter)[1] = 0; (*h_filter)[2] = 1;
+        (*h_filter)[3] = -2; (*h_filter)[4] = 0; (*h_filter)[5] = 2;
+        (*h_filter)[6] = -1; (*h_filter)[7] = 0; (*h_filter)[8] = 1;
+	}
+
+    case 3: // Filtro sobel vertical 3x3
+    {
+        (*h_filter)[0] = -1; (*h_filter)[1] = -2; (*h_filter)[2] = -1;
+        (*h_filter)[3] = 0; (*h_filter)[4] = 0; (*h_filter)[5] = 0;
+        (*h_filter)[6] = 1; (*h_filter)[7] = 2; (*h_filter)[8] = 1;
+	}
     break;
 
     //TODO: crear los filtros segun necesidad. filter debe contener el filtro al finalizar esta función
@@ -308,3 +322,74 @@ void box_filter(uchar4* const d_inputImageRGBA,
     cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
 }
+
+__global__ void rgba_to_greyscale(const uchar4* const rgbaImage,
+    unsigned char* const greyImage,
+    int numRows, int numCols)
+{
+    size_t absolute_image_position_x = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t absolute_image_position_y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (absolute_image_position_x >= numCols ||
+        absolute_image_position_y >= numRows)
+    {
+        return;
+    }
+
+    size_t idx = absolute_image_position_y * numCols + absolute_image_position_x;
+    uchar4 rgbaPixel = rgbaImage[idx];
+    // Convert to greyscale using the luminosity method
+    greyImage[idx] = static_cast<unsigned char>(0.299f * rgbaPixel.x + 0.587f * rgbaPixel.y + 0.114f * rgbaPixel.z);
+}
+
+void canny_edge_detector_filter(uchar4* const d_inputImageRGBA,
+    uchar4* const d_outputImageRGBA,
+    const size_t numRows, const size_t numCols,
+    unsigned char* d_redFiltered, unsigned char*d_greenFiltered)
+{
+
+    float* h_filter;
+    float* d_filter;
+    int filterWidth;
+
+    // Crea d_red
+    checkCudaErrors(cudaMalloc(&d_red, sizeof(unsigned char) * numRows * numCols));
+    checkCudaErrors(cudaMalloc(&d_green, sizeof(unsigned char) * numRows * numCols));
+
+    // Calcular tamaños de bloque
+    const dim3 blockSize(TILE_WIDTH, TILE_HEIGHT, 1);
+    const dim3 gridSize((numCols + blockSize.x - 1) / blockSize.x,
+        (numRows + blockSize.y - 1) / blockSize.y,
+        1);
+
+	// 1. Change to greyscale
+	rgba_to_greyscale << <gridSize, blockSize >> > (d_inputImageRGBA, d_red, numRows, numCols);
+
+    // 2. Blur filter 
+    create_filter(&h_filter, &filterWidth, 0);
+    allocateFilterAndCopyToGPU(h_filter, filterWidth, &d_filter);
+
+	// Now we only need to convolute one of the channels since they are all the same after converting to greyscale
+    convolution << <gridSize, blockSize >> > (d_red, d_redFiltered, numRows, numCols, d_filter, filterWidth);
+    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+
+	// 3. Sobel filters
+    create_filter(&h_filter, &filterWidth, 2);
+    allocateFilterAndCopyToGPU(h_filter, filterWidth, &d_filter);
+	convolution << <gridSize, blockSize >> > (d_redFiltered, d_greenFiltered, numRows, numCols, d_filter, filterWidth);
+	cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+
+	create_filter(&h_filter, &filterWidth, 3);
+	allocateFilterAndCopyToGPU(h_filter, filterWidth, &d_filter);
+	convolution << <gridSize, blockSize >> > (d_greenFiltered, d_redFiltered, numRows, numCols, d_filter, filterWidth);
+	cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+
+	// 4. Non-maximum suppression, double thresholding and edge tracking by hysteresis
+
+    // Recombining the results. 
+    recombineChannels << <gridSize, blockSize >> > (d_redFiltered, d_redFiltered, d_redFiltered, d_outputImageRGBA, numRows, numCols);
+    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+}
+
+
+
