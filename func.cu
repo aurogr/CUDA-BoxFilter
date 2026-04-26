@@ -31,13 +31,13 @@ void check(T err, const char* const func, const char* const file, const int line
 const int TILE_WIDTH = 32;
 const int TILE_HEIGHT = 32;
 // Variable global que debe ser tratadas como si fueran constantes si no es _CANNY_EDGE
-int FILTERSIZE = 5;
+int FILTERSIZE = 9;
 
 // Defines a utilizar en caso de realizar esa funcionalidad (con ifdef y ifndef)
 //#define _CONSTANT_MEMORY 
 
 #ifdef _CONSTANT_MEMORY
-    #define CONSTANT_FILTER_SIZE 5
+    #define CONSTANT_FILTER_SIZE FILTERSIZE
     __constant__ float d_filter_costant[CONSTANT_FILTER_SIZE * CONSTANT_FILTER_SIZE];
 #endif // _CONSTANT_MEMORY
 
@@ -61,7 +61,7 @@ void convolution(const unsigned char* const inputChannel,
     int numRows, int numCols,
     const float* const filter, const int filterWidth)
 {
-	// AGR: MY IMPLEMENTATION OF THE CONVOLUTION KERNEL (TODO: DONE)
+	// TODO: DONE
     
 	size_t absolute_image_position_x = blockIdx.x * blockDim.x + threadIdx.x;
 	size_t absolute_image_position_y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -115,8 +115,7 @@ void separateChannels(const uchar4* const inputImageRGBA,
     unsigned char* const greenChannel,
     unsigned char* const blueChannel)
 {
-
-
+    // TODO: DONE
 	size_t absolute_image_position_x = blockIdx.x * blockDim.x + threadIdx.x;
 	size_t absolute_image_position_y = blockIdx.y * blockDim.y + threadIdx.y;
 
@@ -170,7 +169,6 @@ unsigned char* d_red, * d_green, * d_blue;
 
 void allocateMemoryGPU(const size_t numRowsImage, const size_t numColsImage)
 {
-
     //allocate memory for the three different channels
     checkCudaErrors(cudaMalloc(&d_red, sizeof(unsigned char) * numRowsImage * numColsImage));
     checkCudaErrors(cudaMalloc(&d_green, sizeof(unsigned char) * numRowsImage * numColsImage));
@@ -179,7 +177,7 @@ void allocateMemoryGPU(const size_t numRowsImage, const size_t numColsImage)
 
 void allocateFilterAndCopyToGPU(const float* h_filter, const size_t filterWidth, float** d_filter)
 {
-	// AGR: MY IMPLEMENTATION OF THE FILTER ALLOCATION AND COPY TO GPU (TODO: DONE)
+	// TODO: DONE
 #ifdef _CONSTANT_MEMORY
     cudaMemcpyToSymbol(d_filter_costant, h_filter, sizeof(float) * filterWidth * filterWidth);
 	*d_filter = nullptr; // pointer is not used in this case since we will access the filter directly from constant memory
@@ -281,49 +279,32 @@ void box_filter(uchar4* const d_inputImageRGBA,
 
     //En el caso de Box Filter (un único filtro) el metodo realiza la convolucion siguiendo los siguientes pasos 
 
-    //TODO: Calcular tamaños de bloque
-    const dim3 blockSize(TILE_WIDTH, TILE_HEIGHT, 1);
+    //TODO: DONE Calcular tamaños de bloque
+    const dim3 blockSize(TILE_WIDTH, 
+                        TILE_HEIGHT, 
+                        1);
     const dim3 gridSize((numCols + blockSize.x - 1) / blockSize.x,
-        (numRows + blockSize.y - 1) / blockSize.y,
-        1);
+                        (numRows + blockSize.y - 1) / blockSize.y,
+                        1);
 
     //TODO: Lanzar kernel para separar imagenes RGBA en diferentes colores
-    separateChannels << <gridSize, blockSize >> > (d_inputImageRGBA,
-        numRows,
-        numCols,
-        d_red,
-        d_green,
-		d_blue);
+    separateChannels << <gridSize, blockSize >> > (d_inputImageRGBA, numRows, numCols, d_red, d_green, d_blue);
 
 	cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
      
-    //TODO: Ejecutar kernels para convoluciones teniendo uno por canal
-    convolution << <gridSize, blockSize >> > (d_red,
-        d_redFiltered,
-        numRows, numCols,
-		d_filter, filterWidth);
-	cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
-    convolution << <gridSize, blockSize >> > (d_green,
-        d_greenFiltered,
-		numRows, numCols,
-		d_filter, filterWidth);
-	cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
-    convolution << <gridSize, blockSize >> > (d_blue,
-		d_blueFiltered,
-		numRows, numCols,
-		d_filter, filterWidth);
-	cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+    //TODO: DONE Ejecutar kernels para convoluciones teniendo uno por canal
+    create_filter(&h_filter, &filterWidth, 0);
+    allocateFilterAndCopyToGPU(h_filter, filterWidth, &d_filter);
+
+    convolution << <gridSize, blockSize >> > (d_red, d_redFiltered, numRows, numCols, d_filter, filterWidth);
+    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+    convolution << <gridSize, blockSize >> > (d_green, d_greenFiltered, numRows, numCols, d_filter, filterWidth);
+    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+    convolution << <gridSize, blockSize >> > (d_blue, d_blueFiltered, numRows, numCols, d_filter, filterWidth);
+    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
     // Recombining the results. 
-    recombineChannels << <gridSize, blockSize >> > (d_redFiltered,
-        d_greenFiltered,
-        d_blueFiltered,
-        d_outputImageRGBA,
-        numRows,
-        numCols);
+    recombineChannels << <gridSize, blockSize >> > (d_redFiltered, d_greenFiltered, d_blueFiltered, d_outputImageRGBA, numRows, numCols);
     cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
 }
-
-
-
