@@ -31,7 +31,7 @@ void check(T err, const char* const func, const char* const file, const int line
 const int TILE_WIDTH = 32;
 const int TILE_HEIGHT = 32;
 // Variable global que debe ser tratadas como si fueran constantes si no es _CANNY_EDGE
-int FILTERSIZE = 9;
+int FILTERSIZE = 5;
 
 // Defines a utilizar en caso de realizar esa funcionalidad (con ifdef y ifndef)
 //#define _CONSTANT_MEMORY 
@@ -342,25 +342,140 @@ __global__ void rgba_to_greyscale(const uchar4* const rgbaImage,
     greyImage[idx] = static_cast<unsigned char>(0.299f * rgbaPixel.x + 0.587f * rgbaPixel.y + 0.114f * rgbaPixel.z);
 }
 
+__global__ void compute_magnitude_direction(unsigned char* sobel_h, unsigned char* sobel_d, unsigned char* outputMagnitude, unsigned char* outputDirection, int numRows, int numCols)
+{
+    int absolute_image_position_x = blockIdx.x * blockDim.x + threadIdx.x;
+    int absolute_image_position_y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (absolute_image_position_x >= numCols ||
+        absolute_image_position_y >= numRows)
+    {
+        return;
+    }
+
+    int idx = absolute_image_position_y * numCols + absolute_image_position_x;
+	float magnitude = hypotf(sobel_h[idx], sobel_d[idx]);
+    clamp(magnitude, 0.f, 255.f);
+    outputMagnitude[idx] = magnitude;
+
+	outputDirection[idx] = atan2f(sobel_d[idx], sobel_h[idx]);
+
+}
+
+__global__ void reduceMax(unsigned char* input, unsigned char* output, int len) {
+    // shared memory
+    extern __shared__ float sdata[];
+
+    int global_idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    // load values into shared memory
+    if (global_idx >= len) {
+        sdata[threadIdx.x] = input[0]; // dummy innit
+    }
+    else {
+        sdata[threadIdx.x] = input[global_idx];
+    }
+    __syncthreads();
+
+    // reduce inside shared memory
+    for (unsigned int s = blockDim.x / 2; s > 0; s /= 2) {
+        if (threadIdx.x < s) {
+            sdata[threadIdx.x] = fmaxf(sdata[threadIdx.x], sdata[threadIdx.x + s]);
+        }
+        __syncthreads();
+    }
+
+    // return the block min/max
+    if (threadIdx.x == 0) {
+        output[blockIdx.x] = sdata[0];
+    }
+}
+
+__global__ void non_maximum_supression(const unsigned char* gradientMagnitude,
+    const unsigned char* gradientDirection,
+    unsigned char* const output,
+    int numRows, int numCols)
+{
+    int absolute_image_position_x = blockIdx.x * blockDim.x + threadIdx.x;
+    int absolute_image_position_y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (absolute_image_position_x >= numCols ||
+        absolute_image_position_y >= numRows)
+    {
+        return;
+    }
+
+    int idx = absolute_image_position_y * numCols + absolute_image_position_x;
+
+	float angle = gradientDirection[idx];
+	angle = angle * 180.f / 3.14f; // Convert to degrees
+	angle = fmodf(angle + 180.f, 180.f); // Map angle to [0, 180)
+
+    float q = 255.f;
+    float r = 255.f;
+
+	// NOTA: Cuidado al acceder a memoria que esta fuera de los limites de la imagen, los bordes los dejamos a 0
+    if (absolute_image_position_x == 0 || absolute_image_position_x == numCols - 1 || absolute_image_position_y == 0 || absolute_image_position_y == numRows - 1) {
+        output[absolute_image_position_y * numCols + absolute_image_position_x] = 0;
+        return;
+	}
+
+
+    if (0.f <= angle && angle < 22.5f || 157.5f <= angle && angle <= 180.f) {
+        q = gradientMagnitude[absolute_image_position_y * numCols + (absolute_image_position_x + 1)]; // right
+        r = gradientMagnitude[absolute_image_position_y * numCols + (absolute_image_position_x - 1)]; // left
+    }
+    else if (22.5f <= angle && angle < 67.5f) {
+        q = gradientMagnitude[(absolute_image_position_y + 1) * numCols + (absolute_image_position_x - 1)]; // bottom-left
+        r = gradientMagnitude[(absolute_image_position_y - 1) * numCols + (absolute_image_position_x + 1)]; // top-right
+    }
+    else if (67.5f <= angle && angle < 112.5f) {
+        q = gradientMagnitude[(absolute_image_position_y + 1) * numCols + absolute_image_position_x]; // bottom
+        r = gradientMagnitude[(absolute_image_position_y - 1) * numCols + absolute_image_position_x]; // top
+    }
+    else if (112.5f <= angle && angle < 157.5f) {
+        q = gradientMagnitude[(absolute_image_position_y - 1) * numCols + (absolute_image_position_x - 1)]; // top-left
+        r = gradientMagnitude[(absolute_image_position_y + 1) * numCols + (absolute_image_position_x + 1)]; // bottom-right
+    }
+
+	// Supress non-maximum pixels
+    if (gradientMagnitude[idx] >= q &&
+        gradientMagnitude[idx] >= r) {
+        output[idx] = gradientMagnitude[idx];
+    }
+    else {
+        output[idx] = 0;
+	}
+}
+
+unsigned char* d_sobel_h, * d_sobel_v, *d_magnitude, *d_direction, *d_blockMax;
+
 void canny_edge_detector_filter(uchar4* const d_inputImageRGBA,
     uchar4* const d_outputImageRGBA,
     const size_t numRows, const size_t numCols,
-    unsigned char* d_redFiltered, unsigned char*d_greenFiltered)
+    unsigned char* d_redFiltered)
 {
 
     float* h_filter;
     float* d_filter;
     int filterWidth;
 
-    // Crea d_red
-    checkCudaErrors(cudaMalloc(&d_red, sizeof(unsigned char) * numRows * numCols));
-    checkCudaErrors(cudaMalloc(&d_green, sizeof(unsigned char) * numRows * numCols));
-
     // Calcular tamaños de bloque
     const dim3 blockSize(TILE_WIDTH, TILE_HEIGHT, 1);
     const dim3 gridSize((numCols + blockSize.x - 1) / blockSize.x,
         (numRows + blockSize.y - 1) / blockSize.y,
         1);
+
+	int numBlocks = gridSize.x * gridSize.y;
+
+    // Crear variables
+    checkCudaErrors(cudaMalloc(&d_red, sizeof(unsigned char) * numRows * numCols));
+    checkCudaErrors(cudaMalloc(&d_sobel_h, sizeof(unsigned char) * numRows * numCols));
+    checkCudaErrors(cudaMalloc(&d_sobel_v, sizeof(unsigned char) * numRows * numCols));
+    checkCudaErrors(cudaMalloc(&d_magnitude, sizeof(unsigned char) * numRows * numCols));
+    checkCudaErrors(cudaMalloc(&d_direction, sizeof(unsigned char) * numRows * numCols));
+    checkCudaErrors(cudaMalloc(&d_blockMax, sizeof(unsigned char) * numBlocks));
+
 
 	// 1. Change to greyscale
 	rgba_to_greyscale << <gridSize, blockSize >> > (d_inputImageRGBA, d_red, numRows, numCols);
@@ -376,15 +491,32 @@ void canny_edge_detector_filter(uchar4* const d_inputImageRGBA,
 	// 3. Sobel filters
     create_filter(&h_filter, &filterWidth, 2);
     allocateFilterAndCopyToGPU(h_filter, filterWidth, &d_filter);
-	convolution << <gridSize, blockSize >> > (d_redFiltered, d_greenFiltered, numRows, numCols, d_filter, filterWidth);
-	cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+	convolution << <gridSize, blockSize >> > (d_redFiltered, d_sobel_h, numRows, numCols, d_filter, filterWidth);
 
 	create_filter(&h_filter, &filterWidth, 3);
 	allocateFilterAndCopyToGPU(h_filter, filterWidth, &d_filter);
-	convolution << <gridSize, blockSize >> > (d_greenFiltered, d_redFiltered, numRows, numCols, d_filter, filterWidth);
+	convolution << <gridSize, blockSize >> > (d_redFiltered, d_sobel_v, numRows, numCols, d_filter, filterWidth);
 	cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
 	// 4. Non-maximum suppression, double thresholding and edge tracking by hysteresis
+	compute_magnitude_direction << <gridSize, blockSize >> > (d_sobel_h, d_sobel_v, d_magnitude, d_direction, numRows, numCols);
+	non_maximum_supression << <gridSize, blockSize >> > (d_magnitude, d_direction, d_redFiltered, numRows, numCols);
+    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+
+	// 5. Reduction max to find the maximum magnitude for thresholding
+    int threadsPerBlock = blockSize.x * blockSize.y;
+    int numPixels = numRows * numCols;
+    reduceMax << <gridSize, threadsPerBlock, threadsPerBlock * sizeof(float) >> > (d_redFiltered, d_blockMax, numPixels);
+    // 1.3. run again for the blocks, so it gets global maximum and minimum
+    int remaining = numBlocks;
+
+    while (remaining > 1) {
+        int newBlocks = (remaining + threadsPerBlock - 1) / threadsPerBlock;
+
+        reduceMax << <gridSize, threadsPerBlock, threadsPerBlock * sizeof(float) >> > (d_blockMax, d_blockMax, numPixels);
+
+        remaining = newBlocks;
+    }
 
     // Recombining the results. 
     recombineChannels << <gridSize, blockSize >> > (d_redFiltered, d_redFiltered, d_redFiltered, d_outputImageRGBA, numRows, numCols);

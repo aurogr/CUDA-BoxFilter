@@ -32,8 +32,7 @@ void box_filter(uchar4* const d_inputImageRGBA,
 void canny_edge_detector_filter(uchar4* const d_inputImageRGBA,
     uchar4* const d_outputImageRGBA,
     const size_t numRows, const size_t numCols,
-    unsigned char* d_redFiltered,
-    unsigned char* d_greenFiltered);
+    unsigned char* d_redFiltered);
 
 //****************************************************************************
 // Also note that we've supplied a helpful debugging function called checkCudaErrors.
@@ -189,7 +188,7 @@ int main(int argc, char** argv) {
     //call the students' code
     //box_filter(d_inputImageRGBA, d_outputImageRGBA, numRows(), numCols(), d_redFiltered, d_greenFiltered, d_blueFiltered, id_filter);
 
-    canny_edge_detector_filter(d_inputImageRGBA, d_outputImageRGBA, numRows(), numCols(), d_redFiltered, d_greenFiltered);
+    canny_edge_detector_filter(d_inputImageRGBA, d_outputImageRGBA, numRows(), numCols(), d_redFiltered);
 
     timer.Stop();
 
