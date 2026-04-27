@@ -55,59 +55,55 @@ __host__ __device__ void clamp(float &value, float min, float max) {
     else if (value > max) value = max;
 }
 
-//__global__
-//void convolution(const unsigned char* const inputChannel,
-//    unsigned char* const outputChannel,
-//    int numRows, int numCols,
-//    const float* const filter, const int filterWidth)
-//{
-//	// TODO: DONE
-//    
-//	size_t absolute_image_position_x = blockIdx.x * blockDim.x + threadIdx.x;
-//	size_t absolute_image_position_y = blockIdx.y * blockDim.y + threadIdx.y;
-//
-//    // NOTA: Cuidado al acceder a memoria que esta fuera de los limites de la imagen
-//    // numRows = height, numCols = width
-//     if ( absolute_image_position_x >= numCols ||
-//          absolute_image_position_y >= numRows ) 
-//     {
-//         return;
-//     }
-//
-//	 int hafFilterWidth = filterWidth / 2; // offset that i need to apply to the globalPos inside the convolution loop to get the correct neighbor
-//	 float convResult = 0.f;
-//
-//     for (int krow = 0; krow < filterWidth; ++krow) {
-//		 for (int kcol = 0; kcol < filterWidth; ++kcol) { // loop over the filter elements
-//
-//             int neighborRow = absolute_image_position_y + krow - hafFilterWidth;
-//			 int neighborCol = absolute_image_position_x + kcol - hafFilterWidth;
-//
-//             // NOTA: Que un thread tenga una posición correcta en 2D no quiere decir que al aplicar el filtro
-//             // los valores de sus vecinos sean correctos, ya que pueden salirse de la imagen.
-//			 // clamp neighborRow to be within the image boundaries by repeting the edge values
-//			 clamp(neighborRow, 0, numRows - 1);
-//			 clamp(neighborCol, 0, numCols - 1);
-//
-//#ifdef _CONSTANT_MEMORY
-//			 convResult += d_filter_costant[krow * filterWidth + kcol] * inputChannel[neighborRow * numCols + neighborCol];
-//#elif _SHARED_MEMORY
-//
-//#else // Global memory (default case)
-//			 convResult += filter[krow * filterWidth + kcol] * inputChannel[neighborRow * numCols + neighborCol];
-//#endif
-//         }
-//
-//	 }
-//
-//	 int idx = absolute_image_position_y * numCols + absolute_image_position_x;
-//
-//#ifndef _CANNY_EDGE
-//     clamp(convResult, 0.f, 255.f);
-//#endif
-//
-//	 outputChannel[idx] = convResult;
-//}
+__global__
+void convolution(const unsigned char* const inputChannel,
+    unsigned char* const outputChannel,
+    int numRows, int numCols,
+    const float* const filter, const int filterWidth)
+{
+	// TODO: DONE
+    
+	size_t absolute_image_position_x = blockIdx.x * blockDim.x + threadIdx.x;
+	size_t absolute_image_position_y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    // NOTA: Cuidado al acceder a memoria que esta fuera de los limites de la imagen
+    // numRows = height, numCols = width
+     if ( absolute_image_position_x >= numCols ||
+          absolute_image_position_y >= numRows ) 
+     {
+         return;
+     }
+
+	 int hafFilterWidth = filterWidth / 2; // offset that i need to apply to the globalPos inside the convolution loop to get the correct neighbor
+	 float convResult = 0.f;
+
+     for (int krow = 0; krow < filterWidth; ++krow) {
+		 for (int kcol = 0; kcol < filterWidth; ++kcol) { // loop over the filter elements
+
+             int neighborRow = absolute_image_position_y + krow - hafFilterWidth;
+			 int neighborCol = absolute_image_position_x + kcol - hafFilterWidth;
+
+             // NOTA: Que un thread tenga una posición correcta en 2D no quiere decir que al aplicar el filtro
+             // los valores de sus vecinos sean correctos, ya que pueden salirse de la imagen.
+			 // clamp neighborRow to be within the image boundaries by repeting the edge values
+			 clamp(neighborRow, 0, numRows - 1);
+			 clamp(neighborCol, 0, numCols - 1);
+
+#ifdef _CONSTANT_MEMORY
+			 convResult += d_filter_costant[krow * filterWidth + kcol] * inputChannel[neighborRow * numCols + neighborCol];
+#elif _SHARED_MEMORY
+
+#else // Global memory (default case)
+			 convResult += filter[krow * filterWidth + kcol] * inputChannel[neighborRow * numCols + neighborCol];
+#endif
+         }
+
+	 }
+
+	 int idx = absolute_image_position_y * numCols + absolute_image_position_x;
+     clamp(convResult, 0.f, 255.f);
+	 outputChannel[idx] = convResult;
+}
 
 __global__
 void convolution(const float* const inputChannel,
@@ -220,6 +216,7 @@ void recombineChannels(const unsigned char* const redChannel,
 }
 
 unsigned char* d_red, * d_green, * d_blue;
+float* d_red_float, * d_partial_float, * d_sobel_h, * d_sobel_v, * d_magnitude, * d_direction, * d_blockMax;
 
 void allocateMemoryGPU(const size_t numRowsImage, const size_t numColsImage)
 {
@@ -250,6 +247,13 @@ void cleanupGPU() {
     checkCudaErrors(cudaFree(d_red));
     checkCudaErrors(cudaFree(d_green));
     checkCudaErrors(cudaFree(d_blue));
+	checkCudaErrors(cudaFree(d_red_float));
+	checkCudaErrors(cudaFree(d_partial_float));
+	checkCudaErrors(cudaFree(d_sobel_h));
+	checkCudaErrors(cudaFree(d_sobel_v));
+	checkCudaErrors(cudaFree(d_magnitude));
+	checkCudaErrors(cudaFree(d_direction));
+    checkCudaErrors(cudaFree(d_blockMax));
 }
 
 
@@ -300,6 +304,7 @@ void create_filter(float** h_filter, int* filterWidth, int id_filter) {
     break;
     case 2: // Filtro sobel horizontal 3x3
     {
+        *filterWidth = 3;
         (*h_filter)[0] = -1; (*h_filter)[1] = 0; (*h_filter)[2] = 1;
         (*h_filter)[3] = -2; (*h_filter)[4] = 0; (*h_filter)[5] = 2;
         (*h_filter)[6] = -1; (*h_filter)[7] = 0; (*h_filter)[8] = 1;
@@ -308,9 +313,10 @@ void create_filter(float** h_filter, int* filterWidth, int id_filter) {
     break;
     case 3: // Filtro sobel vertical 3x3
     {
-        (*h_filter)[0] = -1; (*h_filter)[1] = -2; (*h_filter)[2] = -1;
+        *filterWidth = 3;
+        (*h_filter)[0] = 1; (*h_filter)[1] = 2; (*h_filter)[2] = 1;
         (*h_filter)[3] = 0; (*h_filter)[4] = 0; (*h_filter)[5] = 0;
-        (*h_filter)[6] = 1; (*h_filter)[7] = 2; (*h_filter)[8] = 1;
+        (*h_filter)[6] = -1; (*h_filter)[7] = -2; (*h_filter)[8] = -1;
 	}
     break;
 
@@ -483,7 +489,7 @@ __global__ void reduceMax(float* input, float* output, int len) {
 
     // load values into shared memory
     if (global_idx >= len) {
-        sdata[threadIdx.x] = input[0]; // dummy innit
+        sdata[threadIdx.x] = -FLT_MAX; // dummy innit
     }
     else {
         sdata[threadIdx.x] = input[global_idx];
@@ -521,7 +527,7 @@ __global__ void threshold(float* d_img, float max_val, int numRows, int numCols)
 	int idx = absolute_image_position_y * numCols + absolute_image_position_x;
 
 	float highThreshold = max_val * highThresholdRatio;
-	float lowThreshold = highThreshold * lowThresholdRatio;
+	float lowThreshold = 0 * lowThresholdRatio;
 
     if (d_img[idx] >= highThreshold) {
         d_img[idx] = 255; // strong edge
@@ -583,9 +589,6 @@ __global__ void hysteresis(float* d_input, unsigned char* d_output, int numRows,
 	}    
 }
 
-unsigned char *d_partial_unsigned;
-float* d_red_float, *d_partial_float, *d_sobel_h, *d_sobel_v, * d_magnitude, * d_direction, * d_blockMax;
-
 void canny_edge_detector_filter(uchar4* const d_inputImageRGBA,
     uchar4* const d_outputImageRGBA,
     const size_t numRows, const size_t numCols,
@@ -611,12 +614,10 @@ void canny_edge_detector_filter(uchar4* const d_inputImageRGBA,
     checkCudaErrors(cudaMalloc(&d_sobel_v, sizeof(float) * numRows * numCols));
     checkCudaErrors(cudaMalloc(&d_magnitude, sizeof(float) * numRows * numCols));
     checkCudaErrors(cudaMalloc(&d_direction, sizeof(float) * numRows * numCols));
-    checkCudaErrors(cudaMalloc(&d_partial_unsigned, sizeof(unsigned char) * numRows * numCols));
-
 
 	// 1. Change to greyscale
 	rgba_to_greyscale << <gridSize, blockSize >> > (d_inputImageRGBA, d_red_float, numRows, numCols);
-
+    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
     // 2. Blur filter 
     create_filter(&h_filter, &filterWidth, 0);
     allocateFilterAndCopyToGPU(h_filter, filterWidth, &d_filter);
@@ -624,16 +625,20 @@ void canny_edge_detector_filter(uchar4* const d_inputImageRGBA,
 	// Now we only need to convolute one of the channels since they are all the same after converting to greyscale
     convolution << <gridSize, blockSize >> > (d_red_float, d_partial_float, numRows, numCols, d_filter, filterWidth);
     cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+    cudaFree(d_filter);
 
 	// 3. Sobel filters
     create_filter(&h_filter, &filterWidth, 2);
     allocateFilterAndCopyToGPU(h_filter, filterWidth, &d_filter);
 	convolution << <gridSize, blockSize >> > (d_partial_float, d_sobel_h, numRows, numCols, d_filter, filterWidth);
+    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+    cudaFree(d_filter);
 
 	create_filter(&h_filter, &filterWidth, 3);
 	allocateFilterAndCopyToGPU(h_filter, filterWidth, &d_filter);
 	convolution << <gridSize, blockSize >> > (d_partial_float, d_sobel_v, numRows, numCols, d_filter, filterWidth);
 	cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+    cudaFree(d_filter);
 
 	// 4. Non-maximum suppression
 	compute_magnitude_direction << <gridSize, blockSize >> > (d_sobel_h, d_sobel_v, d_magnitude, d_direction, numRows, numCols);
@@ -649,20 +654,20 @@ void canny_edge_detector_filter(uchar4* const d_inputImageRGBA,
     checkCudaErrors(cudaMalloc(&d_blockMax, sizeof(float) * blocks));
 
     reduceMax << <blocks, threadsPerBlock, threadsPerBlock * sizeof(float) >> > (d_partial_float, d_blockMax, numPixels);
+	cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
     // run again for the blocks, so it gets global maximum and minimum
-    int remaining = numBlocks;
+    int remaining = blocks;
     while (remaining > 1) {
         int newBlocks = (remaining + threadsPerBlock - 1) / threadsPerBlock;
         reduceMax << <newBlocks, threadsPerBlock, threadsPerBlock * sizeof(float) >> > (d_blockMax, d_blockMax, remaining);
         remaining = newBlocks;
+		cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
     }
-
+    cudaDeviceSynchronize();
     float h_maxMagnitude;
     checkCudaErrors(cudaMemcpy(&h_maxMagnitude, d_blockMax, sizeof(float), cudaMemcpyDeviceToHost));
-
     // debug log max 
-	std::cout << "Max magnitude: " << (int)h_maxMagnitude << std::endl;
-
+	std::cout << "Max magnitude: " << h_maxMagnitude << std::endl;
     // 6. Double threshold
 	threshold << <gridSize, blockSize >> > (d_partial_float, h_maxMagnitude, numRows, numCols);
 
@@ -672,7 +677,7 @@ void canny_edge_detector_filter(uchar4* const d_inputImageRGBA,
     // Recombining the results. 
     recombineChannels << <gridSize, blockSize >> > (d_redFiltered, d_redFiltered, d_redFiltered, d_outputImageRGBA, numRows, numCols);
     cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+
+    cleanupGPU();
 }
-
-
 
