@@ -31,20 +31,21 @@ void check(T err, const char* const func, const char* const file, const int line
 
 const int TILE_WIDTH = 32;
 const int TILE_HEIGHT = 32;
+const int THREADS_PER_BLOCK = 1024; // max number of threads per block, used for reduction kernel
 // Variable global que debe ser tratadas como si fueran constantes si no es _CANNY_EDGE
 int FILTERSIZE = 9;
 
 // Defines a utilizar en caso de realizar esa funcionalidad (con ifdef y ifndef)
 //#define _CONSTANT_MEMORY 
-
-#ifdef _CONSTANT_MEMORY
-#define MAX_CONSTANT_FILTER_SIZE FILTERSIZE
-__constant__ float d_filter_costant[CONSTANT_FILTER_SIZE * CONSTANT_FILTER_SIZE];
-#endif // _CONSTANT_MEMORY
-
-
 #define _SHARED_MEMORY
 #define _CANNY_EDGE
+
+#ifdef _CONSTANT_MEMORY
+#define MAX_CONSTANT_FILTER_SIZE 81 // 9x9 filter max size, adjust to use bigger filters but remember that constant memory is limited
+__constant__ float d_filter_costant[81];
+#endif // _CONSTANT_MEMORY
+
+#pragma region Kernels
 
 __host__ __device__ void clamp(int& value, int min, int max) {
     if (value < min) value = min;
@@ -235,190 +236,6 @@ void recombineChannels(const unsigned char* const redChannel,
 
     outputImageRGBA[thread_1D_pos] = outputPixel;
 }
-
-unsigned char* d_red, * d_green, * d_blue;
-float* d_red_float, * d_partial_float, * d_sobel_h, * d_sobel_v, * d_magnitude, * d_direction, * d_blockMax;
-
-void allocateMemoryGPU(const size_t numRowsImage, const size_t numColsImage)
-{
-    //allocate memory for the three different channels
-    checkCudaErrors(cudaMalloc(&d_red, sizeof(unsigned char) * numRowsImage * numColsImage));
-    checkCudaErrors(cudaMalloc(&d_green, sizeof(unsigned char) * numRowsImage * numColsImage));
-    checkCudaErrors(cudaMalloc(&d_blue, sizeof(unsigned char) * numRowsImage * numColsImage));
-}
-
-void allocateFilterAndCopyToGPU(const float* h_filter, const size_t filterWidth, float** d_filter)
-{
-    // TODO: DONE
-#ifdef _CONSTANT_MEMORY
-    cudaMemcpyToSymbol(d_filter_costant, h_filter, sizeof(float) * filterWidth * filterWidth);
-    *d_filter = nullptr; // pointer is not used in this case since we will access the filter directly from constant memory
-
-#elif defined(_SHARED_MEMORY)
-    // solo reservamos en memoria global para que el kernel pueda leerlo y subirlo a la compartida despu�s
-    checkCudaErrors(cudaMalloc(d_filter, sizeof(float) * filterWidth * filterWidth));
-    checkCudaErrors(cudaMemcpy(*d_filter, h_filter, sizeof(float) * filterWidth * filterWidth, cudaMemcpyHostToDevice));
-
-#else // Global memory (default case)
-    checkCudaErrors(cudaMalloc(d_filter, sizeof(float) * filterWidth * filterWidth));
-    checkCudaErrors(cudaMemcpy(*d_filter, h_filter, sizeof(float) * filterWidth * filterWidth, cudaMemcpyHostToDevice));
-#endif
-}
-
-//Free all the memory that we allocated
-//TODO: make sure you free any arrays that you allocated
-void cleanupGPU() {
-    checkCudaErrors(cudaFree(d_red));
-    checkCudaErrors(cudaFree(d_green));
-    checkCudaErrors(cudaFree(d_blue));
-    checkCudaErrors(cudaFree(d_red_float));
-    checkCudaErrors(cudaFree(d_partial_float));
-    checkCudaErrors(cudaFree(d_sobel_h));
-    checkCudaErrors(cudaFree(d_sobel_v));
-    checkCudaErrors(cudaFree(d_magnitude));
-    checkCudaErrors(cudaFree(d_direction));
-    checkCudaErrors(cudaFree(d_blockMax));
-}
-
-
-void create_filter(float** h_filter, int* filterWidth, int id_filter) {
-
-    switch (id_filter)
-    {
-
-    case 0: //Filtro gaussiano: blur
-    {
-
-        const int KernelWidth = FILTERSIZE; //OJO CON EL TAMAÑO DEL FILTRO//
-        *filterWidth = KernelWidth;
-
-        //create and fill the filter we will convolve with
-        *h_filter = new float[KernelWidth * KernelWidth];
-
-        const float KernelSigma = 2.;
-
-        float filterSum = 0.f; //for normalization
-
-        for (int r = -KernelWidth / 2; r <= KernelWidth / 2; ++r) {
-            for (int c = -KernelWidth / 2; c <= KernelWidth / 2; ++c) {
-                float filterValue = expf(-(float)(c * c + r * r) / (2.f * KernelSigma * KernelSigma));
-                (*h_filter)[(r + KernelWidth / 2) * KernelWidth + c + KernelWidth / 2] = filterValue;
-                filterSum += filterValue;
-            }
-        }
-
-        float normalizationFactor = 1.f / filterSum;
-
-        for (int r = -KernelWidth / 2; r <= KernelWidth / 2; ++r) {
-            for (int c = -KernelWidth / 2; c <= KernelWidth / 2; ++c) {
-                (*h_filter)[(r + KernelWidth / 2) * KernelWidth + c + KernelWidth / 2] *= normalizationFactor;
-            }
-        }
-    }
-    break;
-
-    case 1: // Filtro Laplaciano 5x5 
-    {
-        *filterWidth = 5;
-        *h_filter = new float[*filterWidth * *filterWidth];
-        (*h_filter)[0] = 0;   (*h_filter)[1] = 0;    (*h_filter)[2] = -1.;  (*h_filter)[3] = 0;    (*h_filter)[4] = 0;
-        (*h_filter)[5] = 0;  (*h_filter)[6] = -1.;  (*h_filter)[7] = -2.;  (*h_filter)[8] = -1.;  (*h_filter)[9] = 0;
-        (*h_filter)[10] = -1.; (*h_filter)[11] = -2.; (*h_filter)[12] = 17.; (*h_filter)[13] = -2.; (*h_filter)[14] = -1.;
-        (*h_filter)[15] = 0; (*h_filter)[16] = -1.; (*h_filter)[17] = -2.; (*h_filter)[18] = -1.; (*h_filter)[19] = 0;
-        (*h_filter)[20] = 0;  (*h_filter)[21] = 0;   (*h_filter)[22] = -1.; (*h_filter)[23] = 0;   (*h_filter)[24] = 0;
-    }
-
-    break;
-    case 2: // Filtro sobel horizontal 3x3
-    {
-        *filterWidth = 3;
-        *h_filter = new float[*filterWidth * *filterWidth];
-        (*h_filter)[0] = -1; (*h_filter)[1] = 0; (*h_filter)[2] = 1;
-        (*h_filter)[3] = -2; (*h_filter)[4] = 0; (*h_filter)[5] = 2;
-        (*h_filter)[6] = -1; (*h_filter)[7] = 0; (*h_filter)[8] = 1;
-    }
-
-    break;
-    case 3: // Filtro sobel vertical 3x3
-    {
-        *filterWidth = 3;
-        *h_filter = new float[*filterWidth * *filterWidth];
-        (*h_filter)[0] = 1; (*h_filter)[1] = 2; (*h_filter)[2] = 1;
-        (*h_filter)[3] = 0; (*h_filter)[4] = 0; (*h_filter)[5] = 0;
-        (*h_filter)[6] = -1; (*h_filter)[7] = -2; (*h_filter)[8] = -1;
-    }
-    break;
-
-    //TODO: crear los filtros segun necesidad. filter debe contener el filtro al finalizar esta función
-    //NOTA: cuidado al establecer el tamaño del filtro a utilizar 
-
-    default:
-        printf("Filtro no definido\n");
-        exit(1);
-    }
-}
-
-
-void box_filter(uchar4* const d_inputImageRGBA,
-    uchar4* const d_outputImageRGBA,
-    const size_t numRows, const size_t numCols,
-    unsigned char* d_redFiltered,
-    unsigned char* d_greenFiltered,
-    unsigned char* d_blueFiltered,
-    int id_filter)
-{
-
-    float* h_filter;
-    float* d_filter;
-    int filterWidth;
-
-    //Crea d_red, d_green y d_blue en GPU. Son variables globales con una vez basta
-    allocateMemoryGPU(numRows, numCols);
-
-    // Crear el filtro en CPU y subirlo a GPU 
-    //create_filter(&h_filter, &filterWidth, id_filter);
-    //allocateFilterAndCopyToGPU(h_filter, filterWidth, &d_filter);
-
-
-    //En _CANNY_EDGE el metodo tendra que ejcutar todos los pasos llamando a diferentes kernels y creando los filtros en CPU (create_filter) y subiendolos a GPU correspondientes (allocateFilterAndCopyToGPU)
-
-    //En el caso de Box Filter (un �nico filtro) el metodo realiza la convolucion siguiendo los siguientes pasos 
-
-    //TODO: DONE Calcular tama�os de bloque
-    const dim3 blockSize(TILE_WIDTH,
-        TILE_HEIGHT,
-        1);
-    const dim3 gridSize((numCols + blockSize.x - 1) / blockSize.x,
-        (numRows + blockSize.y - 1) / blockSize.y,
-        1);
-
-    //TODO: Lanzar kernel para separar imagenes RGBA en diferentes colores
-    separateChannels << <gridSize, blockSize >> > (d_inputImageRGBA, numRows, numCols, d_red, d_green, d_blue);
-
-    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
-
-    //TODO: DONE Ejecutar kernels para convoluciones teniendo uno por canal
-    create_filter(&h_filter, &filterWidth, 0);
-    allocateFilterAndCopyToGPU(h_filter, filterWidth, &d_filter);
-
-    size_t sharedMemSize = 0;
-#ifdef _SHARED_MEMORY
-    sharedMemSize = sizeof(float) * filterWidth * filterWidth;
-#endif
-
-    convolution << <gridSize, blockSize, sharedMemSize >> > (d_red, d_redFiltered, numRows, numCols, d_filter, filterWidth);
-    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
-    convolution << <gridSize, blockSize, sharedMemSize >> > (d_green, d_greenFiltered, numRows, numCols, d_filter, filterWidth);
-    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
-    convolution << <gridSize, blockSize, sharedMemSize >> > (d_blue, d_blueFiltered, numRows, numCols, d_filter, filterWidth);
-    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
-
-    // Recombining the results. 
-    recombineChannels << <gridSize, blockSize >> > (d_redFiltered, d_greenFiltered, d_blueFiltered, d_outputImageRGBA, numRows, numCols);
-    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
-
-}
-
 __global__ void rgba_to_greyscale(const uchar4* const rgbaImage,
     float* const greyImage,
     int numRows, int numCols)
@@ -624,56 +441,211 @@ __global__ void hysteresis(float* d_input, unsigned char* d_output, int numRows,
     }
 }
 
-void canny_edge_detector_filter(uchar4* const d_inputImageRGBA,
+#pragma endregion
+
+#pragma region memory management
+
+unsigned char* d_red, * d_green, * d_blue; // Normal box filter channels
+float* d_red_float, * d_partial_float, * d_sobel_h, * d_sobel_v, * d_magnitude, * d_direction, * d_blockMax; // Canny edge channels and intermediate results
+
+void allocateMemoryGPU(const size_t numRowsImage, const size_t numColsImage)
+{
+#ifdef _CANNY_EDGE
+    checkCudaErrors(cudaMalloc(&d_red_float, sizeof(float) * numRowsImage * numColsImage));
+    checkCudaErrors(cudaMalloc(&d_partial_float, sizeof(float) * numRowsImage * numColsImage));
+    checkCudaErrors(cudaMalloc(&d_sobel_h, sizeof(float) * numRowsImage * numColsImage));
+    checkCudaErrors(cudaMalloc(&d_sobel_v, sizeof(float) * numRowsImage * numColsImage));
+    checkCudaErrors(cudaMalloc(&d_magnitude, sizeof(float) * numRowsImage * numColsImage));
+    checkCudaErrors(cudaMalloc(&d_direction, sizeof(float) * numRowsImage * numColsImage));
+#else 
+    //allocate memory for the three different channels
+    checkCudaErrors(cudaMalloc(&d_red, sizeof(unsigned char) * numRowsImage * numColsImage));
+    checkCudaErrors(cudaMalloc(&d_green, sizeof(unsigned char) * numRowsImage * numColsImage));
+    checkCudaErrors(cudaMalloc(&d_blue, sizeof(unsigned char) * numRowsImage * numColsImage));
+#endif    
+}
+
+void allocateFilterAndCopyToGPU(const float* h_filter, const size_t filterWidth, float** d_filter)
+{
+    // TODO: DONE
+#ifdef _CONSTANT_MEMORY
+    cudaMemcpyToSymbol(d_filter_costant, h_filter, sizeof(float) * filterWidth * filterWidth);
+    *d_filter = nullptr; // pointer is not used in this case since we will access the filter directly from constant memory
+
+#elif defined(_SHARED_MEMORY)
+    // solo reservamos en memoria global para que el kernel pueda leerlo y subirlo a la compartida despu�s
+    checkCudaErrors(cudaMalloc(d_filter, sizeof(float) * filterWidth * filterWidth));
+    checkCudaErrors(cudaMemcpy(*d_filter, h_filter, sizeof(float) * filterWidth * filterWidth, cudaMemcpyHostToDevice));
+
+#else // Global memory (default case)
+    checkCudaErrors(cudaMalloc(d_filter, sizeof(float) * filterWidth * filterWidth));
+    checkCudaErrors(cudaMemcpy(*d_filter, h_filter, sizeof(float) * filterWidth * filterWidth, cudaMemcpyHostToDevice));
+#endif
+}
+
+//Free all the memory that we allocated
+//TODO: make sure you free any arrays that you allocated
+void cleanupGPU() {
+#ifdef _CANNY_EDGE
+    checkCudaErrors(cudaFree(d_red_float));
+    checkCudaErrors(cudaFree(d_partial_float));
+    checkCudaErrors(cudaFree(d_sobel_h));
+    checkCudaErrors(cudaFree(d_sobel_v));
+    checkCudaErrors(cudaFree(d_magnitude));
+    checkCudaErrors(cudaFree(d_direction));
+    checkCudaErrors(cudaFree(d_blockMax));
+#else
+    checkCudaErrors(cudaFree(d_red));
+    checkCudaErrors(cudaFree(d_green));
+    checkCudaErrors(cudaFree(d_blue));
+#endif
+}
+
+
+void create_filter(float** h_filter, int* filterWidth, int id_filter) {
+
+    switch (id_filter)
+    {
+
+    case 0: //Filtro gaussiano: blur
+    {
+
+        const int KernelWidth = FILTERSIZE; //OJO CON EL TAMAÑO DEL FILTRO//
+        *filterWidth = KernelWidth;
+
+        //create and fill the filter we will convolve with
+        *h_filter = new float[KernelWidth * KernelWidth];
+
+        const float KernelSigma = 2.;
+
+        float filterSum = 0.f; //for normalization
+
+        for (int r = -KernelWidth / 2; r <= KernelWidth / 2; ++r) {
+            for (int c = -KernelWidth / 2; c <= KernelWidth / 2; ++c) {
+                float filterValue = expf(-(float)(c * c + r * r) / (2.f * KernelSigma * KernelSigma));
+                (*h_filter)[(r + KernelWidth / 2) * KernelWidth + c + KernelWidth / 2] = filterValue;
+                filterSum += filterValue;
+            }
+        }
+
+        float normalizationFactor = 1.f / filterSum;
+
+        for (int r = -KernelWidth / 2; r <= KernelWidth / 2; ++r) {
+            for (int c = -KernelWidth / 2; c <= KernelWidth / 2; ++c) {
+                (*h_filter)[(r + KernelWidth / 2) * KernelWidth + c + KernelWidth / 2] *= normalizationFactor;
+            }
+        }
+    }
+    break;
+
+    case 1: // Filtro Laplaciano 5x5 
+    {
+        *filterWidth = 5;
+        *h_filter = new float[*filterWidth * *filterWidth];
+        (*h_filter)[0] = 0;   (*h_filter)[1] = 0;    (*h_filter)[2] = -1.;  (*h_filter)[3] = 0;    (*h_filter)[4] = 0;
+        (*h_filter)[5] = 0;  (*h_filter)[6] = -1.;  (*h_filter)[7] = -2.;  (*h_filter)[8] = -1.;  (*h_filter)[9] = 0;
+        (*h_filter)[10] = -1.; (*h_filter)[11] = -2.; (*h_filter)[12] = 17.; (*h_filter)[13] = -2.; (*h_filter)[14] = -1.;
+        (*h_filter)[15] = 0; (*h_filter)[16] = -1.; (*h_filter)[17] = -2.; (*h_filter)[18] = -1.; (*h_filter)[19] = 0;
+        (*h_filter)[20] = 0;  (*h_filter)[21] = 0;   (*h_filter)[22] = -1.; (*h_filter)[23] = 0;   (*h_filter)[24] = 0;
+    }
+
+    break;
+    case 2: // Filtro sobel horizontal 3x3
+    {
+        *filterWidth = 3;
+        *h_filter = new float[*filterWidth * *filterWidth];
+        (*h_filter)[0] = -1; (*h_filter)[1] = 0; (*h_filter)[2] = 1;
+        (*h_filter)[3] = -2; (*h_filter)[4] = 0; (*h_filter)[5] = 2;
+        (*h_filter)[6] = -1; (*h_filter)[7] = 0; (*h_filter)[8] = 1;
+    }
+
+    break;
+    case 3: // Filtro sobel vertical 3x3
+    {
+        *filterWidth = 3;
+        *h_filter = new float[*filterWidth * *filterWidth];
+        (*h_filter)[0] = 1; (*h_filter)[1] = 2; (*h_filter)[2] = 1;
+        (*h_filter)[3] = 0; (*h_filter)[4] = 0; (*h_filter)[5] = 0;
+        (*h_filter)[6] = -1; (*h_filter)[7] = -2; (*h_filter)[8] = -1;
+    }
+    break;
+
+    //TODO: crear los filtros segun necesidad. filter debe contener el filtro al finalizar esta función
+    //NOTA: cuidado al establecer el tamaño del filtro a utilizar 
+
+    default:
+        printf("Filtro no definido\n");
+        exit(1);
+    }
+}
+
+
+void box_filter(uchar4* const d_inputImageRGBA,
     uchar4* const d_outputImageRGBA,
     const size_t numRows, const size_t numCols,
-    unsigned char* d_redFiltered)
+    unsigned char* d_redFiltered,
+    unsigned char* d_greenFiltered,
+    unsigned char* d_blueFiltered,
+    int id_filter)
 {
 
     float* h_filter;
     float* d_filter;
     int filterWidth;
 
-    // Calcular tamaños de bloque
-    const dim3 blockSize(TILE_WIDTH, TILE_HEIGHT, 1);
+    //Crea d_red, d_green y d_blue en GPU. Son variables globales con una vez basta
+    allocateMemoryGPU(numRows, numCols);
+
+    //TODO: DONE Calcular tama�os de bloque
+    const dim3 blockSize(TILE_WIDTH,
+        TILE_HEIGHT,
+        1);
     const dim3 gridSize((numCols + blockSize.x - 1) / blockSize.x,
         (numRows + blockSize.y - 1) / blockSize.y,
         1);
 
-    int numBlocks = gridSize.x * gridSize.y;
+    //En _CANNY_EDGE el metodo tendra que ejcutar todos los pasos llamando a diferentes kernels y creando los filtros en CPU (create_filter) y subiendolos a GPU correspondientes (allocateFilterAndCopyToGPU)
 
-    // Crear variables
-    checkCudaErrors(cudaMalloc(&d_red_float, sizeof(float) * numRows * numCols));
-    checkCudaErrors(cudaMalloc(&d_partial_float, sizeof(float) * numRows * numCols));
-    checkCudaErrors(cudaMalloc(&d_sobel_h, sizeof(float) * numRows * numCols));
-    checkCudaErrors(cudaMalloc(&d_sobel_v, sizeof(float) * numRows * numCols));
-    checkCudaErrors(cudaMalloc(&d_magnitude, sizeof(float) * numRows * numCols));
-    checkCudaErrors(cudaMalloc(&d_direction, sizeof(float) * numRows * numCols));
-
-    allocateMemoryGPU(numCols, numRows);
+#ifdef _CANNY_EDGE
 
     // 1. Change to greyscale
     rgba_to_greyscale << <gridSize, blockSize >> > (d_inputImageRGBA, d_red_float, numRows, numCols);
     cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+
     // 2. Blur filter 
     create_filter(&h_filter, &filterWidth, 0);
     allocateFilterAndCopyToGPU(h_filter, filterWidth, &d_filter);
 
+size_t sharedMemSize = 0;
+#ifdef _SHARED_MEMORY
+    sharedMemSize = sizeof(float) * filterWidth * filterWidth;
+#endif
+
     // Now we only need to convolute one of the channels since they are all the same after converting to greyscale
-    convolution << <gridSize, blockSize >> > (d_red_float, d_partial_float, numRows, numCols, d_filter, filterWidth);
+    convolution << <gridSize, blockSize, sharedMemSize>> > (d_red_float, d_partial_float, numRows, numCols, d_filter, filterWidth);
     cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
     cudaFree(d_filter);
 
     // 3. Sobel filters
     create_filter(&h_filter, &filterWidth, 2);
     allocateFilterAndCopyToGPU(h_filter, filterWidth, &d_filter);
-    convolution << <gridSize, blockSize >> > (d_partial_float, d_sobel_h, numRows, numCols, d_filter, filterWidth);
+
+#ifdef _SHARED_MEMORY
+    sharedMemSize = sizeof(float) * filterWidth * filterWidth;
+#endif
+
+    convolution << <gridSize, blockSize, sharedMemSize >> > (d_partial_float, d_sobel_h, numRows, numCols, d_filter, filterWidth);
     cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
     cudaFree(d_filter);
 
     create_filter(&h_filter, &filterWidth, 3);
     allocateFilterAndCopyToGPU(h_filter, filterWidth, &d_filter);
-    convolution << <gridSize, blockSize >> > (d_partial_float, d_sobel_v, numRows, numCols, d_filter, filterWidth);
+
+#ifdef _SHARED_MEMORY
+    sharedMemSize = sizeof(float) * filterWidth * filterWidth;
+#endif
+
+    convolution << <gridSize, blockSize, sharedMemSize >> > (d_partial_float, d_sobel_v, numRows, numCols, d_filter, filterWidth);
     cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
     cudaFree(d_filter);
 
@@ -685,9 +657,9 @@ void canny_edge_detector_filter(uchar4* const d_inputImageRGBA,
     cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
     // 5. Reduction max to find the maximum magnitude for thresholding
-    int threadsPerBlock = 256;
+    int threadsPerBlock = THREADS_PER_BLOCK;
     int numPixels = numRows * numCols;
-    int blocks = (numPixels + threadsPerBlock - 1) / threadsPerBlock;
+    int blocks = (numPixels + threadsPerBlock - 1) / threadsPerBlock; // set in 1D
     checkCudaErrors(cudaMalloc(&d_blockMax, sizeof(float) * blocks));
 
     reduceMax << <blocks, threadsPerBlock, threadsPerBlock * sizeof(float) >> > (d_partial_float, d_blockMax, numPixels);
@@ -715,6 +687,35 @@ void canny_edge_detector_filter(uchar4* const d_inputImageRGBA,
     recombineChannels << <gridSize, blockSize >> > (d_redFiltered, d_redFiltered, d_redFiltered, d_outputImageRGBA, numRows, numCols);
     cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
+#else
+
+    //En el caso de Box Filter (un unico filtro) el metodo realiza la convolucion siguiendo los siguientes pasos 
+
+    //TODO: DONE Lanzar kernel para separar imagenes RGBA en diferentes colores
+    separateChannels << <gridSize, blockSize >> > (d_inputImageRGBA, numRows, numCols, d_red, d_green, d_blue);
+
+    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+
+    //TODO: DONE Ejecutar kernels para convoluciones teniendo uno por canal
+    create_filter(&h_filter, &filterWidth, 0);
+    allocateFilterAndCopyToGPU(h_filter, filterWidth, &d_filter);
+
+    size_t sharedMemSize = 0;
+#ifdef _SHARED_MEMORY
+    sharedMemSize = sizeof(float) * filterWidth * filterWidth;
+#endif
+
+    convolution << <gridSize, blockSize, sharedMemSize >> > (d_red, d_redFiltered, numRows, numCols, d_filter, filterWidth);
+    convolution << <gridSize, blockSize, sharedMemSize >> > (d_green, d_greenFiltered, numRows, numCols, d_filter, filterWidth);
+    convolution << <gridSize, blockSize, sharedMemSize >> > (d_blue, d_blueFiltered, numRows, numCols, d_filter, filterWidth);
+    
+    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+
+    // Recombining the results. 
+    recombineChannels << <gridSize, blockSize >> > (d_redFiltered, d_greenFiltered, d_blueFiltered, d_outputImageRGBA, numRows, numCols);
+
+#endif
+    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
     cleanupGPU();
 }
 
