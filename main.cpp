@@ -186,9 +186,9 @@ int main(int argc, char** argv) {
     GpuTimer timer;
     timer.Start();
     //call the students' code
-    //box_filter(d_inputImageRGBA, d_outputImageRGBA, numRows(), numCols(), d_redFiltered, d_greenFiltered, d_blueFiltered, id_filter);
+    box_filter(d_inputImageRGBA, d_outputImageRGBA, numRows(), numCols(), d_redFiltered, d_greenFiltered, d_blueFiltered, id_filter);
 
-    canny_edge_detector_filter(d_inputImageRGBA, d_outputImageRGBA, numRows(), numCols(), d_redFiltered);
+    //canny_edge_detector_filter(d_inputImageRGBA, d_outputImageRGBA, numRows(), numCols(), d_redFiltered);
 
     timer.Stop();
 
