@@ -16,6 +16,7 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <cuda_runtime_api.h>
+#include <math_constants.h>
 
 #define checkCudaErrors(val) check( (val), #val, __FILE__, __LINE__)
 
@@ -259,17 +260,18 @@ void cleanupGPU() {
 
 void create_filter(float** h_filter, int* filterWidth, int id_filter) {
 
-    const int KernelWidth = FILTERSIZE; //OJO CON EL TAMAÑO DEL FILTRO//
-    *filterWidth = KernelWidth;
-
-    //create and fill the filter we will convolve with
-    *h_filter = new float[KernelWidth * KernelWidth];
-
     switch (id_filter)
     {
 
     case 0: //Filtro gaussiano: blur
     {
+
+        const int KernelWidth = FILTERSIZE; //OJO CON EL TAMAÑO DEL FILTRO//
+        *filterWidth = KernelWidth;
+
+        //create and fill the filter we will convolve with
+        *h_filter = new float[KernelWidth * KernelWidth];
+
         const float KernelSigma = 2.;
 
         float filterSum = 0.f; //for normalization
@@ -294,6 +296,8 @@ void create_filter(float** h_filter, int* filterWidth, int id_filter) {
 
     case 1: // Filtro Laplaciano 5x5 
     {
+        *filterWidth = 5;
+        *h_filter = new float[*filterWidth * *filterWidth];
         (*h_filter)[0] = 0;   (*h_filter)[1] = 0;    (*h_filter)[2] = -1.;  (*h_filter)[3] = 0;    (*h_filter)[4] = 0;
         (*h_filter)[5] = 0;  (*h_filter)[6] = -1.;  (*h_filter)[7] = -2.;  (*h_filter)[8] = -1.;  (*h_filter)[9] = 0;
         (*h_filter)[10] = -1.; (*h_filter)[11] = -2.; (*h_filter)[12] = 17.; (*h_filter)[13] = -2.; (*h_filter)[14] = -1.;
@@ -305,6 +309,7 @@ void create_filter(float** h_filter, int* filterWidth, int id_filter) {
     case 2: // Filtro sobel horizontal 3x3
     {
         *filterWidth = 3;
+        *h_filter = new float[*filterWidth * *filterWidth];
         (*h_filter)[0] = -1; (*h_filter)[1] = 0; (*h_filter)[2] = 1;
         (*h_filter)[3] = -2; (*h_filter)[4] = 0; (*h_filter)[5] = 2;
         (*h_filter)[6] = -1; (*h_filter)[7] = 0; (*h_filter)[8] = 1;
@@ -314,6 +319,7 @@ void create_filter(float** h_filter, int* filterWidth, int id_filter) {
     case 3: // Filtro sobel vertical 3x3
     {
         *filterWidth = 3;
+        *h_filter = new float[*filterWidth * *filterWidth];
         (*h_filter)[0] = 1; (*h_filter)[1] = 2; (*h_filter)[2] = 1;
         (*h_filter)[3] = 0; (*h_filter)[4] = 0; (*h_filter)[5] = 0;
         (*h_filter)[6] = -1; (*h_filter)[7] = -2; (*h_filter)[8] = -1;
@@ -422,7 +428,7 @@ __global__ void compute_magnitude_direction(float* sobel_h, float* sobel_d, floa
 
 	// direction is the angle of the gradient vector, in radians
     float angle = atan2f(sobel_d[idx], sobel_h[idx]);
-    angle = angle * 180.f / 3.14f; // Convert to degrees
+    angle = angle * 180.f / CUDART_PI; // Convert to degrees
     angle = fmodf(angle + 180.f, 180.f); // Map angle to [0, 180)
     outputDirection[idx] = angle;
 }
@@ -527,7 +533,7 @@ __global__ void threshold(float* d_img, float max_val, int numRows, int numCols)
 	int idx = absolute_image_position_y * numCols + absolute_image_position_x;
 
 	float highThreshold = max_val * highThresholdRatio;
-	float lowThreshold = 0 * lowThresholdRatio;
+	float lowThreshold = highThreshold * lowThresholdRatio;
 
     if (d_img[idx] >= highThreshold) {
         d_img[idx] = 255; // strong edge
@@ -614,6 +620,8 @@ void canny_edge_detector_filter(uchar4* const d_inputImageRGBA,
     checkCudaErrors(cudaMalloc(&d_sobel_v, sizeof(float) * numRows * numCols));
     checkCudaErrors(cudaMalloc(&d_magnitude, sizeof(float) * numRows * numCols));
     checkCudaErrors(cudaMalloc(&d_direction, sizeof(float) * numRows * numCols));
+
+    allocateMemoryGPU(numCols, numRows);
 
 	// 1. Change to greyscale
 	rgba_to_greyscale << <gridSize, blockSize >> > (d_inputImageRGBA, d_red_float, numRows, numCols);
