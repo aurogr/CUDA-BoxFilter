@@ -29,15 +29,15 @@ void check(T err, const char* const func, const char* const file, const int line
     }
 }
 
-const int TILE_WIDTH = 32;
-const int TILE_HEIGHT = 32;
-const int THREADS_PER_BLOCK = 1024; // max number of threads per block, used for reduction kernel
+const int TILE_WIDTH = 16;
+const int TILE_HEIGHT = 16;
+const int THREADS_PER_BLOCK = 1024; // max number 1024
 // Variable global que debe ser tratadas como si fueran constantes si no es _CANNY_EDGE
-int FILTERSIZE = 9;
+int FILTERSIZE = 5;
 
 // Defines a utilizar en caso de realizar esa funcionalidad (con ifdef y ifndef)
-//#define _CONSTANT_MEMORY 
-#define _SHARED_MEMORY
+#define _CONSTANT_MEMORY 
+//#define _SHARED_MEMORY
 #define _CANNY_EDGE
 
 #ifdef _CONSTANT_MEMORY
@@ -570,6 +570,38 @@ void create_filter(float** h_filter, int* filterWidth, int id_filter) {
     }
     break;
 
+    case 4: // nitidez 3x3case
+    {
+        *filterWidth = 3;
+        *h_filter = new float[*filterWidth * *filterWidth];
+
+        (*h_filter)[0] = -1.f; (*h_filter)[1] = -1.f; (*h_filter)[2] = -1.f;
+        (*h_filter)[3] = -1.f; (*h_filter)[4] = 9.f; (*h_filter)[5] = -1.f;
+        (*h_filter)[6] = -1.f; (*h_filter)[7] = -1.f; (*h_filter)[8] = -1.f;
+    }
+    break;
+    case 5: // nitidez 5x5case
+    {
+        *filterWidth = 5;
+        *h_filter = new float[*filterWidth * *filterWidth];
+
+        (*h_filter)[0] = -1.f; (*h_filter)[1] = -3.f; (*h_filter)[2] = -4.f; (*h_filter)[3] = -3.f; (*h_filter)[4] = -1.f;
+        (*h_filter)[5] = -3.f; (*h_filter)[6] = 0.f; (*h_filter)[7] = 6.f; (*h_filter)[8] = 0.f; (*h_filter)[9] = -3.f;
+        (*h_filter)[10] = -4.f; (*h_filter)[11] = 6.f; (*h_filter)[12] = 21.f; (*h_filter)[13] = 6.f; (*h_filter)[14] = -4.f;
+        (*h_filter)[15] = -3.f; (*h_filter)[16] = 0.f; (*h_filter)[17] = 6.f; (*h_filter)[18] = 0.f; (*h_filter)[19] = -3.f;
+        (*h_filter)[20] = -1.f; (*h_filter)[21] = -3.f; (*h_filter)[22] = -4.f; (*h_filter)[23] = -3.f; (*h_filter)[24] = -1.f;
+    }
+    break;
+    case 6: // filtro de suavizado 3x3
+    {
+        *filterWidth = 3;
+        *h_filter = new float[*filterWidth * *filterWidth];
+        (*h_filter)[0] = 1.f / 16.f; (*h_filter)[1] = 2.f / 16.f; (*h_filter)[2] = 1.f / 16.f;
+        (*h_filter)[3] = 2.f / 16.f; (*h_filter)[4] = 4.f / 16.f; (*h_filter)[5] = 2.f / 16.f;
+        (*h_filter)[6] = 1.f / 16.f; (*h_filter)[7] = 2.f / 16.f; (*h_filter)[8] = 1.f / 16.f;
+	}
+	break;
+
     //TODO: crear los filtros segun necesidad. filter debe contener el filtro al finalizar esta función
     //NOTA: cuidado al establecer el tamaño del filtro a utilizar 
 
@@ -596,7 +628,7 @@ void box_filter(uchar4* const d_inputImageRGBA,
     //Crea d_red, d_green y d_blue en GPU. Son variables globales con una vez basta
     allocateMemoryGPU(numRows, numCols);
 
-    //TODO: DONE Calcular tama�os de bloque
+    //TODO: DONE Calcular tamaños de bloque
     const dim3 blockSize(TILE_WIDTH,
         TILE_HEIGHT,
         1);
@@ -613,6 +645,7 @@ void box_filter(uchar4* const d_inputImageRGBA,
     cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
     // 2. Blur filter 
+    FILTERSIZE = 5;
     create_filter(&h_filter, &filterWidth, 0);
     allocateFilterAndCopyToGPU(h_filter, filterWidth, &d_filter);
 
@@ -697,7 +730,7 @@ size_t sharedMemSize = 0;
     cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
     //TODO: DONE Ejecutar kernels para convoluciones teniendo uno por canal
-    create_filter(&h_filter, &filterWidth, 0);
+    create_filter(&h_filter, &filterWidth, id_filter);
     allocateFilterAndCopyToGPU(h_filter, filterWidth, &d_filter);
 
     size_t sharedMemSize = 0;
