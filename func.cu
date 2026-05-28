@@ -33,7 +33,7 @@ const int TILE_WIDTH = 16;
 const int TILE_HEIGHT = 16;
 const int THREADS_PER_BLOCK = 1024; // max number 1024
 // Variable global que debe ser tratadas como si fueran constantes si no es _CANNY_EDGE
-int FILTERSIZE = 5;
+int FILTERSIZE = 9;
 
 // Defines a utilizar en caso de realizar esa funcionalidad (con ifdef y ifndef)
 #define _CONSTANT_MEMORY 
@@ -642,7 +642,6 @@ void box_filter(uchar4* const d_inputImageRGBA,
 
     // 1. Change to greyscale
     rgba_to_greyscale << <gridSize, blockSize >> > (d_inputImageRGBA, d_red_float, numRows, numCols);
-    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
     // 2. Blur filter 
     FILTERSIZE = 5;
@@ -684,10 +683,8 @@ size_t sharedMemSize = 0;
 
     // 4. Non-maximum suppression
     compute_magnitude_direction << <gridSize, blockSize >> > (d_sobel_h, d_sobel_v, d_magnitude, d_direction, numRows, numCols);
-    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
     non_maximum_supression << <gridSize, blockSize >> > (d_magnitude, d_direction, d_partial_float, numRows, numCols);
-    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
     // 5. Reduction max to find the maximum magnitude for thresholding
     int threadsPerBlock = THREADS_PER_BLOCK;
@@ -696,7 +693,6 @@ size_t sharedMemSize = 0;
     checkCudaErrors(cudaMalloc(&d_blockMax, sizeof(float) * blocks));
 
     reduceMax << <blocks, threadsPerBlock, threadsPerBlock * sizeof(float) >> > (d_partial_float, d_blockMax, numPixels);
-    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
     // run again for the blocks, so it gets global maximum and minimum
     int remaining = blocks;
     while (remaining > 1) {
@@ -727,8 +723,6 @@ size_t sharedMemSize = 0;
     //TODO: DONE Lanzar kernel para separar imagenes RGBA en diferentes colores
     separateChannels << <gridSize, blockSize >> > (d_inputImageRGBA, numRows, numCols, d_red, d_green, d_blue);
 
-    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
-
     //TODO: DONE Ejecutar kernels para convoluciones teniendo uno por canal
     create_filter(&h_filter, &filterWidth, id_filter);
     allocateFilterAndCopyToGPU(h_filter, filterWidth, &d_filter);
@@ -741,8 +735,6 @@ size_t sharedMemSize = 0;
     convolution << <gridSize, blockSize, sharedMemSize >> > (d_red, d_redFiltered, numRows, numCols, d_filter, filterWidth);
     convolution << <gridSize, blockSize, sharedMemSize >> > (d_green, d_greenFiltered, numRows, numCols, d_filter, filterWidth);
     convolution << <gridSize, blockSize, sharedMemSize >> > (d_blue, d_blueFiltered, numRows, numCols, d_filter, filterWidth);
-    
-    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
     // Recombining the results. 
     recombineChannels << <gridSize, blockSize >> > (d_redFiltered, d_greenFiltered, d_blueFiltered, d_outputImageRGBA, numRows, numCols);
