@@ -1,9 +1,9 @@
-# 🖥️ CUDA Box Filter and Canny Edge Detector
+# CUDA Box Filter and Canny Edge Detector
 
 Box Filter and Canny Edge Detector filters developed in CUDA as part of an university project developed for the 'Graphic Processors and Real Time Applications' course, part of the Master's Degree in 'Computer Graphics, Games and Virtual Reality' at Rey Juan Carlos University (URJC).
 The project skeleton was provided by the course professor, where I had to implement all the kernels, memory management and the structure of the Canny Edge Detector, on the `func.cu` file.
 
-## 🚀 Features
+## Features
 
 This project implements various image filtering algorithms using highly-parallelized CUDA kernels.
 
@@ -44,7 +44,7 @@ The Canny pipeline is fully parallelized across multiple sequential CUDA kernels
   </tr>
 </table>
 
-## ⚡ Memory Optimizations
+## Memory Optimizations
 
 To reduce the typical 400-800 cycle latency of VRAM (Global Memory), the project incorporates two structural optimizations:
 
