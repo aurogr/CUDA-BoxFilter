@@ -51,7 +51,7 @@ To reduce the typical 400-800 cycle latency of VRAM (Global Memory), the project
 * **Constant Memory (`__constant__`):** The fixed convolution filter coefficients are moved to Constant Memory via `cudaMemcpyToSymbol`. This benefits from the hardware constant cache.
 * **Shared Memory (`__shared__`):** Reduces redundant VRAM fetches. For instance, in a 9x9 filter with a 1024-thread block, global memory requires up to **82,944 read requests**. By staging the filter bounds into fast SRAM shared memory using the first 81 threads and syncing via `__syncthreads()`, global VRAM queries drop to just **81**.
 
-## 🛠️ Build
+## Build
 * **Windows:** Visual Studio Solution (`.sln`).
 * **Linux / macOS:** `CMakeLists.txt` files for easy building.
 
